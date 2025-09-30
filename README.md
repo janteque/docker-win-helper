@@ -39,7 +39,7 @@ Important: exposing the Docker daemon over plain TCP is insecure. Use only on tr
 
    - Download single script (PowerShell):
      ```
-     Invoke-WebRequest -Uri "https://raw.githubusercontent.com/janteque/docker-win-helper/main/docker-over-tcp.ps1" -OutFile [docker-over-tcp.ps1]
+     Invoke-WebRequest -Uri "https://raw.githubusercontent.com/janteque/docker-win-helper/main/docker-over-tcp.ps1" -OutFile docker-over-tcp.ps1
      ```
 
 3. Run the script (no admin required for user-level changes). If your system enforces an execution policy, run with Bypass:
@@ -97,5 +97,6 @@ Exposing Docker remotely without TLS/authentication means any local process that
 - Docker Compose & Buildx releases on GitHub
 
 ## License
+
 
 This project is licensed under the MIT License. See the `LICENSE` file for details.
