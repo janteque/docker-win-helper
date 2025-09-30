@@ -2,7 +2,7 @@
 .SYNOPSIS
   Configures Windows to use a Docker Engine running inside WSL exposing the daemon over TCP on 2375.
   - Shows detailed instructions to edit the Docker service in WSL (override ExecStart).
-  - Creates DOCKER_HOST in Windows (user) pointing to tcp://127.0.0.1:2375.
+  - Creates DOCKER_HOST in Windows (user) pointing to tcp://localhost:2375.
   - Downloads docker.exe/dockerd.exe (chosen version) and adds them to the user PATH.
   - Downloads Docker Compose and Buildx and places them under %USERPROFILE%\.docker\cli-plugins.
 
@@ -35,7 +35,7 @@ Write-Host @"
 ╚════════════════════════════════════════════════════════════════════════════════╝
 
 This script configures Windows to use Docker Engine running inside WSL2 by:
-  • Setting up Docker daemon to expose TCP port 2375 in WSL
+  • Setting up Docker daemon to expose Docker over TCP (secure TLS 2376 recommended, optional insecure 2375)
   • Creating DOCKER_HOST environment variable in Windows
   • Downloading and installing Docker CLI tools for Windows
   • Installing Docker Compose and Buildx plugins
@@ -57,7 +57,7 @@ Press any key to continue or Ctrl+C to exit...
 
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 
-function Ask-YesNo($prompt, [bool]$defaultYes=$true) {
+function Read-YesNo($prompt, [bool]$defaultYes=$true) {
   $suffix = if ($defaultYes) { "[Y/n]" } else { "[y/N]" }
   while ($true) {
     $ans = Read-Host "$prompt $suffix"
@@ -71,7 +71,7 @@ function Ask-YesNo($prompt, [bool]$defaultYes=$true) {
   }
 }
 
-function Ensure-Tls12 {
+function Set-TlsProtocol {
   try {
     [Net.ServicePointManager]::SecurityProtocol = `
       [Net.SecurityProtocolType]::Tls12 -bor `
@@ -80,43 +80,10 @@ function Ensure-Tls12 {
   } catch { }
 }
 
-function Download-File($Url, $OutFile) {
-  Ensure-Tls12
+function Get-RemoteFile($Url, $OutFile) {
+  Set-TlsProtocol
   Write-Host "Downloading: $Url" -ForegroundColor Yellow
   Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing
-}
-
-function Add-ToUserPath([string]$PathToAdd) {
-  $PathToAdd = $PathToAdd.TrimEnd('\\')
-  $userPath = [Environment]::GetEnvironmentVariable('Path','User')
-
-  $already = $false
-  if ($userPath) {
-    $already = $userPath.Split(';') -contains $PathToAdd
-  }
-
-  if (-not $already) {
-    $newPath = if ($userPath) { "$userPath;$PathToAdd" } else { $PathToAdd }
-    [Environment]::SetEnvironmentVariable('Path',$newPath,'User')
-    # Also add to current session
-    if (-not ($env:Path.Split(';') -contains $PathToAdd)) {
-      $env:Path += ";$PathToAdd"
-    }
-    Write-Host "Added to user PATH: $PathToAdd" -ForegroundColor Green
-  } else {
-    Write-Host "User PATH already contains: $PathToAdd" -ForegroundColor DarkGreen
-  }
-}
-
-# Nueva: helper para mostrar y ejecutar comandos en WSL.
-function Invoke-WSLCommand {
-  param(
-    [Parameter(Mandatory)][string]$Command,
-    [switch]$AddSudo
-  )
-  $toRun = if ($AddSudo) { "sudo $Command" } else { $Command }
-  Write-Host "WSL will execute: $toRun" -ForegroundColor Cyan
-  return wsl bash -c $toRun
 }
 
 function Get-LatestDockerStaticVersion {
@@ -203,9 +170,65 @@ function Get-LatestVersions {
   }
 }
 
+function Add-ToUserPath([string]$PathToAdd) {
+  $PathToAdd = $PathToAdd.TrimEnd('\\')
+  $userPath = [Environment]::GetEnvironmentVariable('Path','User')
+
+  $already = $false
+  if ($userPath) {
+    $already = $userPath.Split(';') -contains $PathToAdd
+  }
+
+  if (-not $already) {
+    $newPath = if ($userPath) { "$userPath;$PathToAdd" } else { $PathToAdd }
+    [Environment]::SetEnvironmentVariable('Path',$newPath,'User')
+    # Also add to current session
+    if (-not ($env:Path.Split(';') -contains $PathToAdd)) {
+      $env:Path += ";$PathToAdd"
+    }
+    Write-Host "Added to user PATH: $PathToAdd" -ForegroundColor Green
+  } else {
+    Write-Host "User PATH already contains: $PathToAdd" -ForegroundColor DarkGreen
+  }
+}
+
+# Nueva: helper para mostrar y ejecutar comandos en WSL.
+function Invoke-WSLCommand {
+  param(
+    [Parameter(Mandatory)][string]$Command,
+    [switch]$AddSudo
+  )
+  $toRun = if ($AddSudo) { "sudo $Command" } else { $Command }
+  Write-Host "WSL will execute: $toRun" -ForegroundColor Cyan
+  return wsl bash -c $toRun
+}
+
+# Replace prior sudo caching/batching helpers with a single function that executes all privileged commands
+# inside ONE wsl invocation so sudo only prompts once.
+function Invoke-WSLSudoScript {
+  param(
+    [Parameter(Mandatory)][string]$Script,
+    [string]$Description = 'Executing privileged script in single WSL session'
+  )
+  Write-Host $Description -ForegroundColor Cyan
+  $clean = $Script -replace "`r`n","`n" -replace "`r","`n"
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($clean))
+  wsl bash -c "echo $encoded | base64 -d | sudo bash -s" | Out-Null
+}
+
+# Helper: ensure key.pem on Windows is writable/removable (clear read-only attr and grant user Full control)
+function Unlock-KeyPem {
+  param([Parameter(Mandatory)][string]$Path)
+  if (Test-Path $Path) {
+    try {
+      attrib -R $Path 2>$null | Out-Null
+      icacls $Path /inheritance:r /grant:r "$($env:USERNAME):(F)" 1>$null 2>$null | Out-Null
+    } catch { Write-Warning "Could not adjust Windows permissions on key.pem: $($_.Exception.Message)" }
+  }
+}
 
 # ---------- Step 1: Instructions to expose the daemon in WSL ----------
-Write-Section "1) Expose the WSL Docker Engine via TCP (2375)"
+Write-Section "1) Expose the WSL Docker Engine via TCP (secure TLS 2376 or insecure 2375)"
 
 $wslDistro = (wsl -l -q 2>$null | Select-Object -First 1)
 if (-not $wslDistro) {
@@ -218,15 +241,27 @@ $instructions = @"
 You can configure the Docker service in WSL in two ways:
 
 OPTION A - AUTOMATIC (Recommended):
-  This script will automatically create the systemd drop-in override for you.
+  This script will ask if you want a SECURE TLS endpoint (127.0.0.1:2376) or an INSECURE endpoint (0.0.0.0:2375).
+  TLS mode generates CA/server/client certs and sets DOCKER_TLS_VERIFY/DOCKER_CERT_PATH.
+  Insecure mode leaves the daemon unprotected over TCP (NOT recommended on shared machines / untrusted networks).
 
 OPTION B - MANUAL:
   1) Open a WSL terminal (e.g. run 'wsl' or open Ubuntu from Start Menu)
   2) Run: sudo systemctl edit docker.service
-  3) In the editor, add these EXACT lines and save:
+  3) For SECURE TLS (recommended) add:
+     [Service]
+     ExecStart=
+     ExecStart=/usr/bin/dockerd -H fd:// -H tcp://127.0.0.1:2376 \
+       --tlsverify --tlscacert=/etc/docker/certs/ca.pem \
+       --tlscert=/etc/docker/certs/server-cert.pem --tlskey=/etc/docker/certs/server-key.pem
+
+     (Certificates must exist under /etc/docker/certs as generated by the automatic option.)
+
+     For INSECURE (NOT recommended) add:
      [Service]
      ExecStart=
      ExecStart=/usr/bin/dockerd -H fd:// -H tcp://0.0.0.0:2375
+
   4) Apply changes: sudo systemctl daemon-reload && sudo systemctl restart docker.service
   =============================================================================================
   
@@ -234,78 +269,146 @@ OPTION B - MANUAL:
 
 Write-Host $instructions -ForegroundColor White
 
-$autoConfig = Ask-YesNo "Do you want to automatically configure the Docker service? (Recommended)" $true
+$autoConfig = Read-YesNo "Do you want to automatically configure the Docker service? (Recommended)" $true
 
+# === REFACTORED BLOCK TO USE SINGLE SUDO SESSION ===
 if ($autoConfig) {
   Write-Host "`nConfiguring Docker service automatically..." -ForegroundColor Yellow
-  
-  
   try {
-    # Check if docker service exists first
     Write-Host "Checking Docker service status..." -ForegroundColor Cyan
     $serviceCheck = wsl bash -c "systemctl is-active docker.service 2>/dev/null || echo 'inactive'"
-    
     if ($serviceCheck -match "inactive|failed") {
       Write-Warning "Docker service is not running or doesn't exist. Please install Docker first."
       Write-Host "Please use the manual option (Option B above)." -ForegroundColor Yellow
     } else {
-      # Create the override using printf to avoid line ending issues
-      Write-Host "Creating systemd drop-in override..." -ForegroundColor Cyan
-      # Mostrar y ejecutar los comandos con sudo
-      Invoke-WSLCommand "mkdir -p /etc/systemd/system/docker.service.d" -AddSudo
-      
-      # Este comando usa 'sudo tee' en la parte derecha del pipe; lo mostramos tal cual.
-      Invoke-WSLCommand "printf '%s\n' '[Service]' 'ExecStart=' 'ExecStart=/usr/bin/dockerd -H fd:// -H tcp://0.0.0.0:2375' | sudo tee /etc/systemd/system/docker.service.d/override.conf > /dev/null"
-      
-      Write-Host "Reloading systemd..." -ForegroundColor Cyan
-      Invoke-WSLCommand "systemctl daemon-reload" -AddSudo
-      
-      Write-Host "Restarting Docker service..." -ForegroundColor Cyan
-      Invoke-WSLCommand "systemctl restart docker.service" -AddSudo
-      
-      # Check if restart was successful
+      $useTLS = Read-YesNo "Do you want to secure the Docker daemon with TLS (recommended)? This will generate CA/server/client certs inside WSL and copy client certs to Windows (DOCKER_CERT_PATH)." $true
+      $wslWinPath = "/mnt/c/Users/$($env:USERNAME)/.docker/certs"
+      if ($useTLS) {
+        Write-Host "Preparing secure TLS configuration (dockerd -> 127.0.0.1:2376) in WSL..." -ForegroundColor Cyan
+        $tlsScript = @" 
+set -e
+apt-get update
+apt-get install -y openssl ca-certificates
+mkdir -p /etc/docker/certs $wslWinPath /etc/systemd/system/docker.service.d
+cd /etc/docker/certs
+openssl genrsa -out ca-key.pem 4096
+openssl req -x509 -new -nodes -key ca-key.pem -days 3650 -subj '/CN=docker-ca' -out ca.pem
+openssl genrsa -out server-key.pem 4096
+openssl req -new -key server-key.pem -subj '/CN=localhost' -out server.csr
+printf 'subjectAltName=IP:127.0.0.1,DNS:localhost' > extfile.cnf
+openssl x509 -req -in server.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -out server-cert.pem -days 3650 -extfile extfile.cnf
+openssl genrsa -out key.pem 4096
+openssl req -subj '/CN=docker-client' -new -key key.pem -out client.csr
+openssl x509 -req -in client.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -out cert.pem -days 3650
+chmod 0400 ca-key.pem server-key.pem key.pem && chmod 0444 ca.pem server-cert.pem cert.pem
+printf '%s\n' '[Service]' 'ExecStart=' 'ExecStart=/usr/bin/dockerd -H fd:// -H tcp://127.0.0.1:2376 --tlsverify --tlscacert=/etc/docker/certs/ca.pem --tlscert=/etc/docker/certs/server-cert.pem --tlskey=/etc/docker/certs/server-key.pem' > /etc/systemd/system/docker.service.d/override.conf
+systemctl daemon-reload
+systemctl restart docker.service
+cp /etc/docker/certs/ca.pem $wslWinPath/ca.pem
+cp /etc/docker/certs/cert.pem $wslWinPath/cert.pem
+"@
+        Invoke-WSLSudoScript -Script $tlsScript -Description "Apply TLS configuration and restart Docker"
+        $copyKey = Read-YesNo "Copy the CLIENT PRIVATE KEY (key.pem) to Windows as well? Storing the private key on Windows may be less secure. Only do this if you trust the Windows account." $false
+        if ($copyKey) {
+          # Remove previous key (if any) inside WSL path first to avoid attribute/permission issues
+          Invoke-WSLSudoScript -Description "Remove old key.pem if exists (WSL view)" -Script @" 
+set -e
+rm -f $wslWinPath/key.pem || true
+"@
+          # Copy fresh key
+          Invoke-WSLSudoScript -Description "Copy client private key (single sudo session)" -Script @" 
+set -e
+cp /etc/docker/certs/key.pem $wslWinPath/key.pem
+"@
+          try {
+            $winCertDir = Join-Path $env:USERPROFILE ".docker\certs"
+            $winKeyPath = Join-Path $winCertDir "key.pem"
+            Unlock-KeyPem -Path $winKeyPath
+          } catch { Write-Warning "Could not set ACL on client key (Windows side)." }
+        } else { Write-Host "Client key was NOT copied to Windows." -ForegroundColor Yellow }
+        $winCertDir = Join-Path $env:USERPROFILE ".docker\certs"
+        if (-not (Test-Path $winCertDir)) { New-Item -Path $winCertDir -ItemType Directory -Force | Out-Null }
+        [Environment]::SetEnvironmentVariable('DOCKER_HOST', 'tcp://localhost:2376', 'User')
+        [Environment]::SetEnvironmentVariable('DOCKER_TLS_VERIFY', '1', 'User')
+        [Environment]::SetEnvironmentVariable('DOCKER_CERT_PATH', $winCertDir, 'User')
+        $env:DOCKER_HOST = 'tcp://localhost:2376'
+        $env:DOCKER_TLS_VERIFY = '1'
+        $env:DOCKER_CERT_PATH = $winCertDir
+        $global:ChosenDockerHost = 'tcp://localhost:2376'
+        $global:ChosenTLS = $true
+        $global:ChosenCertPath = $winCertDir
+        Write-Host "TLS setup complete. DOCKER_HOST set to tcp://localhost:2376" -ForegroundColor Green
+      } else {
+        Write-Host "Configuring non-TLS dockerd (0.0.0.0:2375) in one sudo session..." -ForegroundColor Cyan
+        $plainScript = @" 
+set -e
+mkdir -p /etc/systemd/system/docker.service.d
+printf '%s\n' '[Service]' 'ExecStart=' 'ExecStart=/usr/bin/dockerd -H fd:// -H tcp://0.0.0.0:2375' > /etc/systemd/system/docker.service.d/override.conf
+systemctl daemon-reload
+systemctl restart docker.service
+"@
+        Invoke-WSLSudoScript -Script $plainScript -Description "Apply non-TLS configuration and restart Docker"
+        $global:ChosenDockerHost = 'tcp://localhost:2375'
+        $global:ChosenTLS = $false
+      }
       Start-Sleep -Seconds 3
       $status = wsl bash -c "systemctl is-active docker.service"
-      
-      if ($status -match "active") {
-        Write-Host "✓ Docker service configured and restarted successfully!" -ForegroundColor Green
-      } else {
-        Write-Warning "✗ Docker service restart failed. Checking status..."
-        $statusOutput = wsl bash -c "systemctl status docker.service --no-pager -l"
-        Write-Host $statusOutput -ForegroundColor Red
-        Write-Host "Please check the logs with: wsl sudo journalctl -xeu docker.service" -ForegroundColor Yellow
-      }
+      if ($status -match "active") { Write-Host "✓ Docker service configured and restarted successfully!" -ForegroundColor Green } else { Write-Warning "✗ Docker service restart failed. Check logs." }
     }
-    
   } catch {
     Write-Warning "Automatic configuration failed: $($_.Exception.Message)"
     Write-Host "Please use the manual option (Option B above)." -ForegroundColor Yellow
   }
 } else {
   Write-Host "`nPlease follow the manual steps above to configure Docker service." -ForegroundColor Yellow
-  if (Ask-YesNo "Do you want to open a WSL shell now to perform the manual steps? (type 'exit' afterwards to return)" $true) {
-    wsl
-  }
+  if (Read-YesNo "Do you want to open a WSL shell now to perform the manual steps? (type 'exit' afterwards to return)" $true) { wsl }
 }
+# === END REFACTORED BLOCK ===
 
-# Try to verify the endpoint
-Write-Host "Checking http://localhost:2375/version ..." -ForegroundColor Yellow
+# Try to verify the endpoint from inside WSL
+Write-Host "Checking that Docker is running inside WSL..." -ForegroundColor Yellow
 try {
-  $resp = Invoke-WebRequest -Uri "http://localhost:2375/version" -UseBasicParsing -TimeoutSec 5
-  if ($resp.StatusCode -eq 200 -and $resp.Content) {
-    Write-Host "OK: Docker Engine responds on 2375." -ForegroundColor Green
+  # Run 'docker info' in WSL; suppress errors and return the output if the daemon responds
+  $wslCmd = 'docker info --format "{{json .}}" 2>/dev/null || true'
+  $resp = wsl bash -c $wslCmd
+  if ($resp -and $resp.Trim()) {
+    Write-Host "OK: Docker responds inside WSL." -ForegroundColor Green
+  } else {
+    Write-Warning "Docker is not responding inside WSL yet. You can continue; we'll check again later."
   }
 } catch {
-  Write-Warning "Could not confirm the endpoint yet. You can continue; we'll re-check later."
+  Write-Warning "Could not run the check inside WSL: $($_.Exception.Message)"
 }
 
 # ---------- Step 2: DOCKER_HOST in Windows ----------
 Write-Section "2) Create/update DOCKER_HOST (user)"
 
-$dockerHost = "tcp://localhost:2375"
-[Environment]::SetEnvironmentVariable('DOCKER_HOST', $dockerHost, 'User')
-$env:DOCKER_HOST = $dockerHost
-Write-Host "DOCKER_HOST (user) = $dockerHost" -ForegroundColor Green
+if (-not $global:ChosenDockerHost) { # Manual path fallback
+  $global:ChosenDockerHost = 'tcp://localhost:2375'
+  $global:ChosenTLS = $false
+}
+
+# Clear previous vars first to avoid stale secure settings when switching to insecure
+[Environment]::SetEnvironmentVariable('DOCKER_HOST', $null, 'User')
+[Environment]::SetEnvironmentVariable('DOCKER_TLS_VERIFY', $null, 'User')
+[Environment]::SetEnvironmentVariable('DOCKER_CERT_PATH', $null, 'User')
+
+[Environment]::SetEnvironmentVariable('DOCKER_HOST', $global:ChosenDockerHost, 'User')
+$env:DOCKER_HOST = $global:ChosenDockerHost
+
+if ($global:ChosenTLS) {
+  [Environment]::SetEnvironmentVariable('DOCKER_TLS_VERIFY', '1', 'User')
+  if ($global:ChosenCertPath) { [Environment]::SetEnvironmentVariable('DOCKER_CERT_PATH', $global:ChosenCertPath, 'User'); $env:DOCKER_CERT_PATH = $global:ChosenCertPath }
+  $env:DOCKER_TLS_VERIFY = '1'
+  Write-Host "DOCKER_HOST (user) = $global:ChosenDockerHost (TLS enabled)" -ForegroundColor Green
+  if (-not $global:ChosenCertPath) { Write-Warning "TLS selected but no certificate path recorded. You may need to set DOCKER_CERT_PATH manually." }
+} else {
+  # Ensure session clears TLS vars
+  Remove-Item Env:DOCKER_TLS_VERIFY -ErrorAction SilentlyContinue
+  Remove-Item Env:DOCKER_CERT_PATH -ErrorAction SilentlyContinue
+  Write-Host "DOCKER_HOST (user) = $global:ChosenDockerHost (INSECURE - no TLS)" -ForegroundColor Yellow
+  Write-Warning "Insecure Docker daemon over TCP. Consider rerunning script and enabling TLS." 
+}
 
 # ---------- Step 3: Show WSL version and ask target versions ----------
 Write-Section "3) Versions to use"
@@ -326,7 +429,7 @@ Write-Host "  Buildx (releases): https://github.com/docker/buildx/releases" -For
 
 # ---------- Optional: Fetch latest versions using helper script ----------
 Write-Section "Fetch latest versions (optional)"
-if (Ask-YesNo "Do you want to fetch the latest available versions and use them as defaults?" $true) {
+if (Read-YesNo "Do you want to fetch the latest available versions and use them as defaults?" $true) {
   try {
     Write-Host "Fetching latest versions from sources..." -ForegroundColor Yellow
     $latest = Get-LatestVersions
@@ -377,7 +480,7 @@ $zipUrl = "https://download.docker.com/win/static/stable/x86_64/docker-$dockerVe
 $zipFile = Join-Path $tmp.FullName ("docker-$dockerVer.zip")
 
 try {
-  Download-File -Url $zipUrl -OutFile $zipFile
+  Get-RemoteFile -Url $zipUrl -OutFile $zipFile
 } catch {
   Write-Error "Could not download $zipUrl. Check the version you entered."
   exit 1
@@ -404,13 +507,11 @@ if (Test-Path (Join-Path $inner "dockerd.exe")) {
 $credUrl = "https://github.com/docker/docker-credential-helpers/releases/download/v$credVer/docker-credential-wincred-v$credVer.windows-amd64.exe"
 $credTmp = Join-Path $tmp.FullName ("docker-credential-wincred-v" + $credVer + ".exe")
 try {
-  Download-File -Url $credUrl -OutFile $credTmp
+  Get-RemoteFile -Url $credUrl -OutFile $credTmp
   Copy-Item -Path $credTmp -Destination (Join-Path $dest "docker-credential-wincred.exe") -Force
   Unblock-File -Path (Join-Path $dest "docker-credential-wincred.exe") -ErrorAction SilentlyContinue
   Write-Host "docker-credential-wincred.exe installed at: " (Join-Path $dest "docker-credential-wincred.exe") -ForegroundColor Green
-} catch {
-  Write-Warning "Could not download docker-credential-wincred ($credUrl)."
-}
+} catch { Write-Warning "Could not download docker-credential-wincred ($credUrl)." }
 
 # Add to user PATH
 Add-ToUserPath -PathToAdd $dest
@@ -427,12 +528,10 @@ Write-Section "6) Download Docker Compose"
 $composeUrl = "https://github.com/docker/compose/releases/download/v$composeVer/docker-compose-windows-x86_64.exe"
 $composeExe = Join-Path $pluginsDir "docker-compose.exe"
 try {
-  Download-File -Url $composeUrl -OutFile $composeExe
+  Get-RemoteFile -Url $composeUrl -OutFile $composeExe
   Unblock-File -Path $composeExe -ErrorAction SilentlyContinue
   Write-Host "docker-compose.exe installed at: $composeExe" -ForegroundColor Green
-} catch {
-  Write-Warning "Could not download Compose ($composeUrl)."
-}
+} catch { Write-Warning "Could not download Compose ($composeUrl)." }
 
 # ---------- Step 7: Download Buildx ----------
 Write-Section "7) Download Buildx"
@@ -443,14 +542,12 @@ $buildxUrl = "https://github.com/docker/buildx/releases/download/v$buildxVer/bui
 $buildxPlugin = Join-Path $pluginsDir "docker-buildx.exe"
 $buildxShort  = Join-Path $pluginsDir "buildx.exe"
 try {
-  Download-File -Url $buildxUrl -OutFile $buildxPlugin
+  Get-RemoteFile -Url $buildxUrl -OutFile $buildxPlugin
   Copy-Item $buildxPlugin $buildxShort -Force
   Unblock-File -Path $buildxPlugin -ErrorAction SilentlyContinue
   Unblock-File -Path $buildxShort -ErrorAction SilentlyContinue
   Write-Host "Buildx installed at: $buildxPlugin (and alias $buildxShort)" -ForegroundColor Green
-} catch {
-  Write-Warning "Could not download Buildx ($buildxUrl)."
-}
+} catch { Write-Warning "Could not download Buildx ($buildxUrl)." }
 
 # ---------- Final checks ----------
 Write-Section "Final checks"
@@ -461,15 +558,11 @@ try {
   & (Join-Path $dest "docker.exe") --version
 } catch { Write-Warning "Could not execute docker.exe from $dest" }
 
-try {
-  Write-Host "`nRemote Docker Engine (2375) '_ping':" -ForegroundColor Yellow
-  (Invoke-WebRequest -Uri "http://localhost:2375/_ping" -UseBasicParsing -TimeoutSec 5).Content
-} catch { Write-Warning "/_ping not responding yet." }
 
 try {
-  Write-Host "`n'docker version' (using DOCKER_HOST=$env:DOCKER_HOST):" -ForegroundColor Yellow
+  Write-Host "`n'docker version' (using DOCKER_HOST=$env:DOCKER_HOST, TLS=$([bool]$global:ChosenTLS)):" -ForegroundColor Yellow
   docker version
-} catch { Write-Warning "CLI could not connect to daemon. Check step 1 and DOCKER_HOST." }
+} catch { Write-Warning "CLI could not connect to daemon. Check Step 1 and DOCKER_HOST." }
 
 try {
   Write-Host "`n'docker compose version':" -ForegroundColor Yellow
