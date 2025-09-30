@@ -21,9 +21,33 @@ Important: exposing the Docker daemon over plain TCP is insecure. Use only on tr
 ## Usage
 
 1. Open PowerShell.
-2. Run the script:
-   pwsh c:\programas\docker-helper\docker-over-tcp.ps1
-3. Follow interactive prompts to:
+
+2. Download the repository (choose one):
+
+   - With Git:
+     ```
+     git clone https://github.com/janteque/docker-win-helper.git
+     cd docker-win-helper
+     ```
+
+   - Without Git (PowerShell):
+     ```
+     Invoke-WebRequest -Uri "https://github.com/janteque/docker-win-helper/archive/refs/heads/main.zip" -OutFile docker-win-helper.zip
+     Expand-Archive docker-win-helper.zip -DestinationPath .
+     cd docker-win-helper-main
+     ```
+
+   - Download single script (PowerShell):
+     ```
+     Invoke-WebRequest -Uri "https://raw.githubusercontent.com/janteque/docker-win-helper/main/docker-over-tcp.ps1" -OutFile [docker-over-tcp.ps1]
+     ```
+
+3. Run the script (no admin required for user-level changes). If your system enforces an execution policy, run with Bypass:
+   ```
+   pwsh -ExecutionPolicy Bypass -File .\docker-over-tcp.ps1
+   ```
+
+4. Follow interactive prompts to:
    - Automatically configure the Docker service inside WSL (recommended) or show manual steps.
    - Fetch or accept default versions for docker, compose, buildx and credential helper.
    - Choose destination folder for Windows CLI binaries.
@@ -74,4 +98,4 @@ Exposing Docker remotely without TLS/authentication means any local process that
 
 ## License
 
-This repository contains a convenience script — adapt and use at your own
+This project is licensed under the MIT License. See the `LICENSE` file for details.
