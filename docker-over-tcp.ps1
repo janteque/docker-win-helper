@@ -207,11 +207,51 @@ function Get-LatestVersions {
 # ---------- Step 1: Instructions to expose the daemon in WSL ----------
 Write-Section "1) Expose the WSL Docker Engine via TCP (2375)"
 
-$wslDistro = (wsl -l -q 2>$null | Select-Object -First 1)
-if (-not $wslDistro) {
-  Write-Warning "No WSL distribution detected. Aborting."
+# Listar distros disponibles
+$distros = wsl -l -q 2>$null | Where-Object { $_ -and $_.Trim() -ne "" }
+
+if (-not $distros -or $distros.Count -eq 0) {
+  Write-Warning "No se detectan distribuciones WSL. Aborto."
   exit 1
 }
+
+# Detectar default actual (si lo hay)
+$defaultDistro = (wsl -l 2>$null | Select-String '^\* ' | ForEach-Object {
+  $_.ToString().TrimStart('* ').Trim()
+})
+
+# Mostrar menú y solicitar selección
+Write-Host "Selecciona la distribución WSL con la que quieres trabajar:`n"
+for ($i = 0; $i -lt $distros.Count; $i++) {
+  $marker = if ($distros[$i] -eq $defaultDistro) { " (actual por defecto)" } else { "" }
+  Write-Host ("[{0}] {1}{2}" -f ($i+1), $distros[$i], $marker)
+}
+
+$selection = Read-Host "`nIntroduce el número de la distribución"
+if (-not ($selection -as [int]) -or $selection -lt 1 -or $selection -gt $distros.Count) {
+  Write-Warning "Selección no válida. Aborto."
+  exit 1
+}
+
+$wslDistro = $distros[$selection - 1]
+
+# Establecer como default si no lo es ya
+if ($wslDistro -ne $defaultDistro) {
+  Write-Host "Estableciendo '$wslDistro' como distribución por defecto..."
+  wsl -s "$wslDistro"
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warning "No se pudo establecer la distribución por defecto. Aborto."
+    exit 1
+  }
+}
+
+# Comprobación posterior (tu condición original ya no fallará)
+if (-not $wslDistro) {
+  Write-Warning "No se estableció ninguna distribución WSL. Aborto."
+  exit 1
+}
+
+Write-Host "Usando WSL distro: $wslDistro"
 
 $instructions = @"
 
@@ -483,4 +523,5 @@ try {
 
 Write-Host "`n======================================================================" -ForegroundColor Cyan
 Write-Host "`nAll done!!" -ForegroundColor Cyan
+
 Write-Host "`n======================================================================" -ForegroundColor Cyan
